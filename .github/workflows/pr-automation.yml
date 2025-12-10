@@ -1,0 +1,175 @@
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - name: Run ESLint
+        run: npm run lint > eslint-results.txt 2>&1
+        continue-on-error: true
+      - name: Run Prettier
+        run: npx prettier --check . > prettier-results.txt 2>&1
+        continue-on-error: true
+      - name: Post Code Quality Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const eslintResults = fs.readFileSync('eslint-results.txt', 'utf8');
+            const prettierResults = fs.readFileSync('prettier-results.txt', 'utf8');
+            const comment = `## Code Quality Report\n\n### ESLint Results:\n\`\`\`\n${eslintResults || 'No ESLint issues found'}\n\`\`\`\n\n### Prettier Results:\n\`\`\`\n${prettierResults || 'No Prettier formatting issues found'}\n\`\`\``;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+
+  testing-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - name: Run Tests with Coverage
+        run: npm test -- --coverage > test-results.txt 2>&1
+        continue-on-error: true
+      - name: Generate Coverage Summary
+        run: |
+          echo "## Test Coverage Report" > coverage-summary.txt
+          echo "" >> coverage-summary.txt
+          if [ -f coverage/lcov-report/index.html ]; then
+            COVERAGE=$(grep -oP 'statement.*?\d+\.\d+%' coverage/lcov-report/index.html | head -1 | grep -oP '\d+\.\d+%')
+            echo "Total Statement Coverage: $COVERAGE" >> coverage-summary.txt
+          else
+            echo "Coverage report not found" >> coverage-summary.txt
+          fi
+      - name: Post Test Coverage Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const testResults = fs.readFileSync('test-results.txt', 'utf8');
+            const coverageSummary = fs.readFileSync('coverage-summary.txt', 'utf8');
+            const comment = `${coverageSummary}\n\n### Test Results:\n\`\`\`\n${testResults || 'No test results'}\n\`\`\``;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+      - name: Upload Coverage Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - name: Check Dependency Vulnerabilities
+        run: npm audit --json > npm-audit.json 2>&1
+        continue-on-error: true
+      - name: Scan for Secrets
+        uses: trufflesecurity/trufflehog@v3
+        with:
+          path: .
+          output: secret-scan-results.txt
+          format: text
+        continue-on-error: true
+      - name: Generate Security Report
+        run: |
+          echo "## Security Scan Report" > security-report.txt
+          echo "" >> security-report.txt
+          echo "### Dependencies Vulnerabilities:" >> security-report.txt
+          if [ -f npm-audit.json ]; then
+            VULNS=$(jq '.metadata.vulnerabilities' npm-audit.json)
+            echo "\`\`\`json\n$VULNS\n\`\`\`" >> security-report.txt
+          else
+            echo "No dependency vulnerabilities found" >> security-report.txt
+          fi
+          echo "" >> security-report.txt
+          echo "### Secret Scan Results:" >> security-report.txt
+          if [ -f secret-scan-results.txt ]; then
+            SECRETS=$(cat secret-scan-results.txt)
+            echo "\`\`\`\n$SECRETS\n\`\`\`" >> security-report.txt
+          else
+            echo "No secrets found" >> security-report.txt
+          fi
+      - name: Post Security Scan Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const securityReport = fs.readFileSync('security-report.txt', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: securityReport
+            });
+
+  build-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+      - run: npm ci
+      - name: Build Application
+        run: npm run build > build-results.txt 2>&1
+        continue-on-error: true
+      - name: Validate Endpoints
+        run: |
+          npm start &
+          sleep 10
+          echo "## Build Validation" > build-report.txt
+          echo "" >> build-report.txt
+          echo "### Build Results:" >> build-report.txt
+          BUILD_RESULTS=$(cat build-results.txt)
+          echo "\`\`\`\n$BUILD_RESULTS\n\`\`\`" >> build-report.txt
+          echo "" >> build-report.txt
+          echo "### Endpoint Validation:" >> build-report.txt
+          if curl -s http://localhost:3000 > /dev/null; then
+            echo "✅ Root endpoint accessible" >> build-report.txt
+          else
+            echo "❌ Root endpoint not accessible" >> build-report.txt
+          fi
+          pkill -f node
+        continue-on-error: true
+      - name: Post Build Validation Report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const buildReport = fs.readFileSync('build-report.txt', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: buildReport
+            });
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-artifacts
+          path: dist/
